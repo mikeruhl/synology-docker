@@ -106,6 +106,18 @@ readonly CONFIG_MARKER='# Managed by install_fuse_overlayfs.sh'
 readonly SYSTEMD_DROPIN_DIR="/etc/systemd/system/pkg-${SYNO_DOCKER_SERV_NAME}-dockerd.service.d"
 readonly SYSTEMD_DROPIN="${SYSTEMD_DROPIN_DIR}/no-iptables-raw.conf"
 
+# DSM 6 has no systemd at all (services run through synoservicectl/Upstart), so the env var dockerd needs to
+# tolerate a missing iptable_raw has to be exported from the package's own start-stop-status script instead of a
+# systemd drop-in. Same anchor line install_iptables_modules.sh inserts after, since every DSM version ships it.
+readonly STARTSTOP_FILE="${SYNO_DOCKER_DIR}/scripts/start-stop-status"
+readonly STARTSTOP_INSERTAFTER='iptablestool --insmod "${DockerServName}" ${InsertModules}'
+readonly STARTSTOP_MARKER='# Added by install_fuse_overlayfs.sh: skip iptable_raw requirement'
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  readonly USE_SYSTEMD='true'
+else
+  readonly USE_SYSTEMD='false'
+fi
+
 #======================================================================================================================
 # Downloads a file and verifies its SHA-256 checksum, terminating on any failure.
 #======================================================================================================================
@@ -191,6 +203,37 @@ install_fuse_overlayfs() {
 }
 
 #======================================================================================================================
+# Extracts the 'data.tar.*' member of a .deb (itself a plain 'ar' archive) into a directory, without depending on
+# the 'ar' binary - DSM's userland doesn't ship one. .deb archives use the classic fixed-layout ar format (60-byte
+# headers, no GNU long-name table, since every member name is short), so the headers are parsed directly: 16 bytes
+# name, then date/uid/gid/mode we don't need, then a 10-byte size field at offset 48, padded to an even boundary.
+#======================================================================================================================
+# Arguments:
+#   $1 - Path to the .deb file
+#   $2 - Directory to extract 'data.tar.*' into
+#======================================================================================================================
+extract_deb_data_tar() {
+  local deb="$1" dest="$2" offset=8 header name size
+  if command -v ar >/dev/null 2>&1; then
+    (cd "${dest}" && ar x "${deb}")
+    return
+  fi
+  while true ; do
+    # Command substitution strips the header's trailing newline (part of the "`\n" magic at the end of
+    # every 60-byte header), so a valid header reads back as 59 chars; only real EOF reads back empty.
+    header=$(tail -c "+$((offset+1))" "${deb}" | head -c 60)
+    [ -z "${header}" ] && break
+    name=$(printf '%s' "${header}" | cut -c1-16 | sed 's/[ /]*$//')
+    size=$(printf '%s' "${header}" | cut -c49-58 | sed 's/ *$//')
+    offset=$((offset + 60))
+    case "${name}" in
+      data.tar.* ) tail -c "+$((offset+1))" "${deb}" | head -c "${size}" > "${dest}/${name}" ;;
+    esac
+    offset=$((offset + size + size % 2))
+  done
+}
+
+#======================================================================================================================
 # Install fuse3 userspace tools (fusermount3, mount.fuse3, libfuse3)
 #======================================================================================================================
 install_fuse3_tools() {
@@ -205,7 +248,8 @@ install_fuse3_tools() {
   fetch "${FUSE3_DEB_URL}" "${deb_dir}/fuse3.deb" "${FUSE3_DEB_SHA256}"
   fetch "${LIBFUSE3_DEB_URL}" "${deb_dir}/libfuse3.deb" "${LIBFUSE3_DEB_SHA256}"
   for deb in fuse3 libfuse3; do
-    (cd "${deb_dir}" && ar x "${deb}.deb" && tar xf data.tar.* && rm -f data.tar.* control.tar.* debian-binary)
+    extract_deb_data_tar "${deb_dir}/${deb}.deb" "${deb_dir}"
+    (cd "${deb_dir}" && tar xf data.tar.* && rm -f data.tar.* control.tar.* debian-binary)
   done
 
   install -m 755 "${deb_dir}/bin/fusermount3" /usr/local/bin/fusermount3
@@ -355,21 +399,50 @@ neutralize_updater() {
 }
 
 #======================================================================================================================
-# Kernel 4.4 can also lack iptable_raw. Only when it can't be loaded, tell dockerd to run without it via a systemd
-# drop-in; this relaxes Docker's raw-table protection, so it isn't applied where the module is available.
+# Kernel 4.4 can also lack iptable_raw. Only when it can't be loaded, tell dockerd to run without it; this relaxes
+# Docker's raw-table protection, so it isn't applied where the module is available. DSM 7 gets a systemd drop-in;
+# DSM 6 has no systemd (synoservicectl/Upstart manage services instead), so the env var is exported directly from
+# start-stop-status, right after the line install_iptables_modules.sh also anchors on.
 #======================================================================================================================
 configure_iptables_raw() {
   if lsmod | grep -q '^iptable_raw' || modprobe iptable_raw 2>/dev/null || \
     { [ -f /lib/modules/iptable_raw.ko ] && insmod /lib/modules/iptable_raw.ko 2>/dev/null; }; then
     echo "iptable_raw is available, no iptables workaround needed"
-    rm -f "${SYSTEMD_DROPIN}"
+    remove_iptables_raw_workaround
     return
   fi
-  echo "iptable_raw is not available, creating systemd drop-in to run dockerd without it..."
-  mkdir -p "${SYSTEMD_DROPIN_DIR}"
-  printf '[Service]\nEnvironment="DOCKER_INSECURE_NO_IPTABLES_RAW=1"\n' > "${SYSTEMD_DROPIN}"
-  systemctl daemon-reload
-  echo "  Created ${SYSTEMD_DROPIN}"
+  if [ "${USE_SYSTEMD}" = 'true' ]; then
+    echo "iptable_raw is not available, creating systemd drop-in to run dockerd without it..."
+    mkdir -p "${SYSTEMD_DROPIN_DIR}"
+    printf '[Service]\nEnvironment="DOCKER_INSECURE_NO_IPTABLES_RAW=1"\n' > "${SYSTEMD_DROPIN}"
+    systemctl daemon-reload
+    echo "  Created ${SYSTEMD_DROPIN}"
+    return
+  fi
+  echo "iptable_raw is not available, patching start-stop-status to run dockerd without it..."
+  [ -f "${STARTSTOP_FILE}" ] || terminate "Could not find ${STARTSTOP_FILE} to patch"
+  if grep -qF "${STARTSTOP_MARKER}" "${STARTSTOP_FILE}"; then
+    echo "  Already patched, skipping"
+    return
+  fi
+  local match="^[[:space:]]*${STARTSTOP_INSERTAFTER}"
+  sed -i "/${match}/a\\    ${STARTSTOP_MARKER}\\n    export DOCKER_INSECURE_NO_IPTABLES_RAW=1" "${STARTSTOP_FILE}"
+  grep -qF "${STARTSTOP_MARKER}" "${STARTSTOP_FILE}" || \
+    terminate "Could not patch ${STARTSTOP_FILE} (anchor line not found)"
+  echo "  Patched ${STARTSTOP_FILE}"
+}
+
+#======================================================================================================================
+# Undoes configure_iptables_raw(), whichever mechanism it used.
+#======================================================================================================================
+remove_iptables_raw_workaround() {
+  if [ -f "${SYSTEMD_DROPIN}" ]; then
+    rm -f "${SYSTEMD_DROPIN}"
+    systemctl daemon-reload
+  fi
+  if [ -f "${STARTSTOP_FILE}" ] && grep -qF "${STARTSTOP_MARKER}" "${STARTSTOP_FILE}"; then
+    sed -i "/${STARTSTOP_MARKER}/{N;/export DOCKER_INSECURE_NO_IPTABLES_RAW=1/d}" "${STARTSTOP_FILE}"
+  fi
 }
 
 #======================================================================================================================
@@ -399,14 +472,15 @@ uninstall() {
     rm -f "${CONTAINERD_CONFIG}"
     [ -f "${CONTAINERD_CONFIG}.pre-fuse-overlayfs" ] && mv "${CONTAINERD_CONFIG}.pre-fuse-overlayfs" "${CONTAINERD_CONFIG}"
   fi
-  if [ -f "${SYSTEMD_DROPIN}" ]; then
-    rm -f "${SYSTEMD_DROPIN}"
-    systemctl daemon-reload
-  fi
+  remove_iptables_raw_workaround
   rm -f /usr/local/bin/fuse-overlayfs /usr/local/bin/containerd-fuse-overlayfs-grpc /usr/local/bin/fusermount3 \
     /sbin/mount.fuse3
   echo
-  echo "Done. Restart Docker to apply: sudo synopkg stop ${SYNO_DOCKER_SERV_NAME} && sudo synopkg start ${SYNO_DOCKER_SERV_NAME}"
+  if [ "${USE_SYSTEMD}" = 'true' ]; then
+    echo "Done. Restart Docker to apply: sudo synopkg stop ${SYNO_DOCKER_SERV_NAME} && sudo synopkg start ${SYNO_DOCKER_SERV_NAME}"
+  else
+    echo "Done. Restart Docker to apply: sudo synoservicectl --stop pkgctl-${SYNO_DOCKER_SERV_NAME} && sudo synoservicectl --start pkgctl-${SYNO_DOCKER_SERV_NAME}"
+  fi
   echo "fuse-overlayfs image data is left in ${FUSE_OVERLAYFS_DATA}; delete it once you no longer need it."
 }
 
@@ -441,9 +515,15 @@ echo
 echo "=== Installation complete ==="
 echo
 echo "To activate, run:"
-echo "  1. Stop Docker:  sudo synopkg stop ${SYNO_DOCKER_SERV_NAME}"
-echo "  2. Start fuse-overlayfs services:  sudo ${RC_SCRIPT} start"
-echo "  3. Start Docker:  sudo synopkg start ${SYNO_DOCKER_SERV_NAME}"
+if [ "${USE_SYSTEMD}" = 'true' ]; then
+  echo "  1. Stop Docker:  sudo synopkg stop ${SYNO_DOCKER_SERV_NAME}"
+  echo "  2. Start fuse-overlayfs services:  sudo ${RC_SCRIPT} start"
+  echo "  3. Start Docker:  sudo synopkg start ${SYNO_DOCKER_SERV_NAME}"
+else
+  echo "  1. Stop Docker:  sudo synoservicectl --stop pkgctl-${SYNO_DOCKER_SERV_NAME}"
+  echo "  2. Start fuse-overlayfs services:  sudo ${RC_SCRIPT} start"
+  echo "  3. Start Docker:  sudo synoservicectl --start pkgctl-${SYNO_DOCKER_SERV_NAME}"
+fi
 echo
 echo "Or reboot the NAS (the rc.d script starts the services automatically)."
 echo

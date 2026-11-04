@@ -35,7 +35,16 @@ INSERT="${INSERT}   # Load raw modules\n"
 INSERT="${INSERT}   insmod ${MODULES_FOLDER}/${IP4MODULE}\n"
 INSERT="${INSERT}   insmod ${MODULES_FOLDER}/${IP6MODULE}"
 KERNEL_VERSION=$(uname -r)
+# DSM 7 has a 'platform_name' key; DSM 6 doesn't, but both expose the platform codename as the
+# middle segment of 'unique' (e.g. 'synology_bromolow_1515+' -> 'bromolow').
 PLATFORM_VERSION=$(/bin/get_key_value /etc.defaults/synoinfo.conf platform_name)
+if [ -z "${PLATFORM_VERSION}" ]; then
+  PLATFORM_VERSION=$(/bin/get_key_value /etc.defaults/synoinfo.conf unique | sed -n 's/^synology_\([^_]*\)_.*$/\1/p')
+fi
+if [ -z "${PLATFORM_VERSION}" ]; then
+  echo "Could not determine the platform name from /etc.defaults/synoinfo.conf (checked 'platform_name' and 'unique')."
+  exit 1
+fi
 IP4DL="https://raw.githubusercontent.com/telnetdoogie-labs/synology-kernelmodules/main/compiled_modules/${KERNEL_VERSION}/${PLATFORM_VERSION}/${IP4MODULE}"
 IP6DL="https://raw.githubusercontent.com/telnetdoogie-labs/synology-kernelmodules/main/compiled_modules/${KERNEL_VERSION}/${PLATFORM_VERSION}/${IP6MODULE}"
 

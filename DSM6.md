@@ -120,6 +120,49 @@ Branch: `dsm6-compatibility` (merges the individual fix branches below).
      `pkill` the `containerd --config /etc/containerd/config.toml`
      process directly) before the next run could succeed.
 
+7. **`userland-proxy is enabled, but userland-proxy-path is not set`** (not
+   DSM 6-specific - any DSM box upgrading to Docker 27+ would hit this,
+   found here first)
+   - Docker 27's dockerd stopped auto-discovering `docker-proxy` (via PATH
+     or a hardcoded default) when `userland-proxy` is enabled (the
+     default), and now refuses to start at all unless the config file says
+     where it is. Synology installs `docker-proxy` outside dockerd's
+     built-in search paths, so this always needs to be explicit on a
+     Synology box; it just wasn't, since older Docker didn't require it.
+   - This is most likely the *real* reason `pkgctl-Docker failed to
+     Start.. error unknow` showed at Step 10 - `synoservicectl` swallows
+     dockerd's actual stderr, but running dockerd by hand with the same
+     config reproduced this exact validation error immediately.
+   - Fix: `syno_docker_switch_logger.sh` (runs on every `logger`/`update`/
+     `install`, already rewrites several dockerd.json keys) now also sets
+     `userland-proxy-path`, derived from the dockerd.json path it's
+     already given (`<pkg dir>/etc/dockerd.json` -> `<pkg dir>/target/usr/bin/docker-proxy`)
+     rather than needing a new argument.
+
+## Dead end found - not pursuing
+
+- **fuse-overlayfs doesn't work on this box at all**, independent of
+  everything above. `containerd-fuse-overlayfs-grpc`'s own startup
+  healthcheck mount failed:
+  `mount.fuse3: /lib/libc.so.6: version 'GLIBC_2.28' not found`.
+  Checked Debian's archive: the *oldest* fuse3 package still published
+  anywhere (buster, `3.4.1-1+deb10u1`) already requires glibc >= 2.28.
+  DSM 6.2.4's glibc predates that, so no Debian-packaged fuse3 build - not
+  even a much older one - will ever satisfy this host via the approach
+  `install_fuse_overlayfs.sh` uses (containerd snapshotter proxy_plugin,
+  which needs `mount.fuse3`/`libfuse3.so.3`).
+  - Practical ceiling on this specific hardware: stay on `aufs` (works
+    today) and keep the Docker target below 24 - `aufs` was dropped in
+    Docker 24+ with nothing but `overlay2` (unavailable - old kernel, no
+    overlay module) or `fuse-overlayfs` (unavailable - see above) as
+    replacements.
+  - A real fix would mean reworking `install_fuse_overlayfs.sh` to use
+    Docker's classic fuse-overlayfs graphdriver instead of a containerd
+    snapshotter proxy_plugin - the graphdriver execs the statically-linked
+    `fuse-overlayfs` binary directly and may not need `mount.fuse3`/
+    `libfuse3.so.3` at all. Not attempted yet; substantial rework, not a
+    quick patch.
+
 ## Known but not yet fixed
 
 - No precompiled `iptable_raw.ko`/`ip6table_raw.ko` exist for kernel

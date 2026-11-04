@@ -58,13 +58,21 @@ echo
 #  .["iptables"] = true
 #' "$DOCKERD_FILE" > "$DOCKERD_FILE.tmp" && mv "$DOCKERD_FILE.tmp" "$DOCKERD_FILE"
 
-jq '
+# Docker 27+ dockerd no longer auto-discovers docker-proxy's location (via PATH or a hardcoded default) when
+# userland-proxy is enabled (the default) - it now fails outright with "userland-proxy is enabled, but
+# userland-proxy-path is not set" unless the config file says where it is. Synology installs it outside dockerd's
+# built-in search paths, so this has to be set explicitly; derived from DOCKERD_FILE's own location rather than
+# passed in, since it's always "<pkg dir>/etc/dockerd.json" next to "<pkg dir>/target/usr/bin/docker-proxy".
+DOCKER_PROXY_BIN="$(dirname "$(dirname "${DOCKERD_FILE}")")/target/usr/bin/docker-proxy"
+
+jq --arg proxy_path "${DOCKER_PROXY_BIN}" '
   .["group"] = "administrators" |
   .["log-driver"] = "local" |
   .["log-opts"] = {
     "max-file": "5",
     "max-size": "20m"
-  }
+  } |
+  .["userland-proxy-path"] = $proxy_path
 ' "$DOCKERD_FILE" > "$DOCKERD_FILE.tmp" && mv "$DOCKERD_FILE.tmp" "$DOCKERD_FILE"
 
 # Output the new JSON file

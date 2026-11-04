@@ -1036,6 +1036,15 @@ execute_stop_syno() {
     fi
     terminate "Timed out stopping Docker (status: ${syno_status})"
   fi
+
+  # The separate containerd fuse-overlayfs uses is only ever started (in execute_start_syno, once Docker is back
+  # up) and otherwise just keeps running across invocations of this script - including a previous run's, which
+  # would still be holding the old containerd binary open here and failing the install step with "Text file busy".
+  # Stopped only once Docker itself is confirmed down, since dockerd depends on it while running.
+  if [ "${install_fuse}" = 'true' ] && [ -x "${FUSE_OVERLAYFS_RC_SCRIPT}" ] ; then
+    echo "   - stopping fuse-overlayfs services"
+    "${FUSE_OVERLAYFS_RC_SCRIPT}" stop
+  fi
 }
 
 #======================================================================================================================

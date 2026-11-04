@@ -95,6 +95,30 @@ Branch: `dsm6-compatibility` (merges the individual fix branches below).
      `update` command. It re-extracts and re-copies every binary from the
      downloaded tarball, so it self-heals once the ordering bug no longer
      leaves containerd busy during the copy.
+   - Turned out insufficient on its own (see #6) - the real fix needed a
+     symmetric stop, not just a later start.
+
+6. **Still `Text file busy` on `containerd`, even after #5** (same branch)
+   - `FUSE_OVERLAYFS_RC_SCRIPT start` is only ever called once, in
+     `execute_start_syno()` - nothing in the main script ever stops it
+     again. Its external containerd process is meant to keep running for
+     as long as Docker uses fuse-overlayfs, so it survives fine across a
+     normal reboot or a `syno start`/`syno stop` of just the Docker
+     package. But it also survives across *re-running this script*, so a
+     previous run's still-running instance held the binary open through a
+     later run's `execute_install_bin`, even with the start moved later in
+     fix #5 - there was nothing left in *this* run holding it busy, but the
+     orphan from the *last* run was.
+   - Fix: added a matching `FUSE_OVERLAYFS_RC_SCRIPT stop` to the end of
+     `execute_stop_syno()`, once Docker/ContainerManager is confirmed fully
+     stopped (dockerd depends on it while running, so it's stopped only
+     after, not before). Now every run's own stop/start pair brackets the
+     binary swap cleanly regardless of what an earlier run left behind.
+   - Needed a one-time manual recovery on the box this was found on: a
+     stuck orphan from before this fix existed had to be killed by hand
+     (`sudo /usr/local/etc/rc.d/containerd-fuse-overlayfs.sh stop`, or
+     `pkill` the `containerd --config /etc/containerd/config.toml`
+     process directly) before the next run could succeed.
 
 ## Known but not yet fixed
 

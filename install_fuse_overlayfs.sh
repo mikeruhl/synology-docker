@@ -438,7 +438,10 @@ configure_iptables_raw() {
 remove_iptables_raw_workaround() {
   if [ -f "${SYSTEMD_DROPIN}" ]; then
     rm -f "${SYSTEMD_DROPIN}"
-    systemctl daemon-reload
+    # The drop-in file's existence doesn't guarantee systemd is present - an older, pre-fix run of this script
+    # could have created it (mkdir+printf) and only then crashed on 'systemctl daemon-reload' itself on DSM 6,
+    # leaving the file behind on a host that never had systemd to begin with.
+    [ "${USE_SYSTEMD}" = 'true' ] && systemctl daemon-reload
   fi
   if [ -f "${STARTSTOP_FILE}" ] && grep -qF "${STARTSTOP_MARKER}" "${STARTSTOP_FILE}"; then
     sed -i "/${STARTSTOP_MARKER}/{N;/export DOCKER_INSECURE_NO_IPTABLES_RAW=1/d}" "${STARTSTOP_FILE}"

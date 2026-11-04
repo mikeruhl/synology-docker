@@ -205,16 +205,45 @@ Branch: `dsm6-compatibility` (merges the individual fix branches below).
      Reachability became dependent entirely on whether a request happened
      to match one of Synology's own static firewall allow-rules for that
      port/source range.
-   - Fix: try `DOCKER-FORWARD` first (checking it actually exists via
-     `iptables -nL`, not just blindly inserting), fall back to `DOCKER-USER`
-     if it doesn't. Updated the matching removal/dedup sed patterns too, so
-     a future re-run cleans up this new form instead of duplicating it.
+   - Fix (v1, insufficient on its own - see #10): try `DOCKER-FORWARD`
+     first (checking it actually exists via `iptables -nL`, not just
+     blindly inserting), fall back to `DOCKER-USER` if it doesn't. Updated
+     the matching removal/dedup sed patterns too, so a future re-run
+     cleans up this new form instead of duplicating it.
    - Immediate fix for a box already in this state (no need to wait for a
      full re-run): `sudo iptables -I FORWARD 1 -j DOCKER-USER` (or
      `DOCKER-FORWARD`, whichever the installed dockerd actually created -
-     check with `sudo iptables -t filter -S | grep '^-N DOCKER'`). To apply
-     the script fix permanently without a full binary update, use
-     `./syno_docker_update.sh only_script` and restart Docker once.
+     check with `sudo iptables -S | grep '^-N DOCKER'`, the unfiltered
+     form - see #10 for why). This doesn't survive a container recreate or
+     a Docker restart, so it needs redoing until #10's fix is deployed.
+
+10. **The DOCKER-FORWARD/DOCKER-USER fix (above) was itself broken, by the
+    same root cause as #9's confusion while diagnosing this.**
+    - `iptables -nL <chain>`, `-L <chain>`, `-S <chain>` and `-C <chain> ...`
+      - every form that takes a specific chain name as a direct argument -
+      fails with `No chain/target/match by that name` on this box's
+      iptables v1.6.0, **even for chains that demonstrably exist**.
+      Confirmed side-by-side: `iptables -S FORWARD` reported `FORWARD`
+      missing, while `iptables -S` (no name, full dump) in the very same
+      shell session showed `FORWARD` present with rules. Same for
+      `DOCKER-USER`. This looks like a genuine bug/quirk in this specific
+      build, not a real chain-existence difference.
+    - Fix #9 used exactly the broken form (`iptables -nL "${chain}"`) to
+      decide whether to insert the jump - so it always got a false
+      negative, concluded neither chain existed, and skipped inserting
+      anything. That's why deploying it (`only_script` + restart) and the
+      manual `iptables -I FORWARD 1 -j DOCKER-USER` workaround both
+      "didn't work": the jump kept silently failing to land, or getting
+      wiped on the next container recreate / Docker restart with nothing
+      re-adding it (the manual command has to be redone by hand every time
+      something restarts Docker or recreates the network).
+    - Real fix: every existence/rule check now goes through the unfiltered
+      `iptables -S` (no chain argument) piped to `grep`, never a named-chain
+      query form. Confirmed working by hand first (`iptables -S | grep -q
+      '^-N DOCKER-USER$'` correctly returns true), then baked into
+      `SYNO_DOCKER_SCRIPT_FORWARDING`.
+    - If chasing anything like this again on this box: trust `iptables -S`
+      (bare) over any named-chain form. The named forms lie.
 
 ## Known but not yet fixed
 

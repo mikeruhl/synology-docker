@@ -75,7 +75,14 @@ readonly SYNO_DOCKER_JSON="${SYNO_DOCKER_JSON_PATH}/dockerd.json"
 # up 'DOCKER-USER' instead, which left this jump targeting a chain that doesn't exist - a no-op, silently - so
 # nothing ever forwarded into Docker's own chains and published ports stayed unreachable. Try both, use whichever
 # this dockerd actually created.
-readonly SYNO_DOCKER_SCRIPT_FORWARDING="            # Added by docker update\n          iptables -P FORWARD ACCEPT\n          for chain in DOCKER-FORWARD DOCKER-USER; do iptables -nL \"\${chain}\" >/dev/null 2>&1 && { iptables -C FORWARD -j \"\${chain}\" 2>/dev/null || iptables -I FORWARD 1 -j \"\${chain}\"; break; }; done"
+#
+# Existence/rule checks use 'iptables -S' (the unfiltered full dump) piped to grep, not 'iptables -S <chain>' or
+# '-L <chain>' or '-C ...' - every form that takes a specific chain name as a direct argument was found to fail
+# with "No chain/target/match by that name" on a real DSM 6 box's iptables v1.6.0, EVEN FOR CHAINS THAT EXIST
+# (confirmed against 'FORWARD' and 'DOCKER-USER' both, each present per the unfiltered dump at the same time the
+# named-argument form reported them missing). Silently false-negatives on this bug meant this fix's own existence
+# check always skipped inserting the jump, which is why it kept looking like a no-op after being deployed.
+readonly SYNO_DOCKER_SCRIPT_FORWARDING="            # Added by docker update\n          iptables -P FORWARD ACCEPT\n          for chain in DOCKER-FORWARD DOCKER-USER; do iptables -S | grep -q \"^-N \${chain}\$\" && { iptables -S | grep -q \"^-A FORWARD -j \${chain}\$\" || iptables -I FORWARD 1 -j \"\${chain}\"; break; }; done"
 readonly SYNO_SERVICE_STOP_TIMEOUT='10m'
 readonly SYNO_STATUS_POLL_INTERVAL=5
 readonly SYNOPKG_BIN='/usr/syno/bin/synopkg'

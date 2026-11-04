@@ -191,6 +191,37 @@ install_fuse_overlayfs() {
 }
 
 #======================================================================================================================
+# Extracts the 'data.tar.*' member of a .deb (itself a plain 'ar' archive) into a directory, without depending on
+# the 'ar' binary - DSM's userland doesn't ship one. .deb archives use the classic fixed-layout ar format (60-byte
+# headers, no GNU long-name table, since every member name is short), so the headers are parsed directly: 16 bytes
+# name, then date/uid/gid/mode we don't need, then a 10-byte size field at offset 48, padded to an even boundary.
+#======================================================================================================================
+# Arguments:
+#   $1 - Path to the .deb file
+#   $2 - Directory to extract 'data.tar.*' into
+#======================================================================================================================
+extract_deb_data_tar() {
+  local deb="$1" dest="$2" offset=8 header name size
+  if command -v ar >/dev/null 2>&1; then
+    (cd "${dest}" && ar x "${deb}")
+    return
+  fi
+  while true ; do
+    # Command substitution strips the header's trailing newline (part of the "`\n" magic at the end of
+    # every 60-byte header), so a valid header reads back as 59 chars; only real EOF reads back empty.
+    header=$(tail -c "+$((offset+1))" "${deb}" | head -c 60)
+    [ -z "${header}" ] && break
+    name=$(printf '%s' "${header}" | cut -c1-16 | sed 's/[ /]*$//')
+    size=$(printf '%s' "${header}" | cut -c49-58 | sed 's/ *$//')
+    offset=$((offset + 60))
+    case "${name}" in
+      data.tar.* ) tail -c "+$((offset+1))" "${deb}" | head -c "${size}" > "${dest}/${name}" ;;
+    esac
+    offset=$((offset + size + size % 2))
+  done
+}
+
+#======================================================================================================================
 # Install fuse3 userspace tools (fusermount3, mount.fuse3, libfuse3)
 #======================================================================================================================
 install_fuse3_tools() {
@@ -205,7 +236,8 @@ install_fuse3_tools() {
   fetch "${FUSE3_DEB_URL}" "${deb_dir}/fuse3.deb" "${FUSE3_DEB_SHA256}"
   fetch "${LIBFUSE3_DEB_URL}" "${deb_dir}/libfuse3.deb" "${LIBFUSE3_DEB_SHA256}"
   for deb in fuse3 libfuse3; do
-    (cd "${deb_dir}" && ar x "${deb}.deb" && tar xf data.tar.* && rm -f data.tar.* control.tar.* debian-binary)
+    extract_deb_data_tar "${deb_dir}/${deb}.deb" "${deb_dir}"
+    (cd "${deb_dir}" && tar xf data.tar.* && rm -f data.tar.* control.tar.* debian-binary)
   done
 
   install -m 755 "${deb_dir}/bin/fusermount3" /usr/local/bin/fusermount3

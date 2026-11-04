@@ -139,6 +139,32 @@ Branch: `dsm6-compatibility` (merges the individual fix branches below).
      already given (`<pkg dir>/etc/dockerd.json` -> `<pkg dir>/target/usr/bin/docker-proxy`)
      rather than needing a new argument.
 
+8. **`--uninstall` hit the same `systemctl: command not found` it was
+   cleaning up after**
+   - The very first (pre-fix) `--fuse-overlayfs` attempt on this box got
+     as far as `mkdir`+`printf`-ing the systemd drop-in file before
+     crashing on the `systemctl daemon-reload` right after it (fix #4,
+     above) - leaving that drop-in file sitting on disk despite there
+     being no systemd on this host at all.
+   - `remove_iptables_raw_workaround()`'s cleanup checked "does the
+     drop-in file exist" to decide whether to run `systemctl
+     daemon-reload`, not "is this actually a systemd host" - so cleaning
+     up that one stale leftover file hit the identical crash.
+   - Fix: guard that call on `USE_SYSTEMD` instead of file presence.
+
+## Early warning added
+
+- **`check_glibc_for_fuse3()`**, run first thing in
+  `install_fuse_overlayfs.sh` (before any download, before touching
+  `dockerd.json` or the Synology updater): compares the host's glibc
+  (parsed from `ldd --version`) against `2.34` - the highest floor among
+  everything the pinned `fuse3`/`libfuse3-3` `.deb`s need - and `terminate`s
+  with an explanation + the "stay on aufs, target below 24" advice
+  immediately if it's too old, instead of letting someone else rediscover
+  the dead end below the hard way, multiple layers of config changes deep.
+  Re-check this threshold if `FUSE3_DEB_VERSION` is ever bumped - a newer
+  pin may need a newer glibc floor.
+
 ## Dead end found - not pursuing
 
 - **fuse-overlayfs doesn't work on this box at all**, independent of

@@ -132,6 +132,29 @@ fetch() {
 }
 
 #======================================================================================================================
+# Fails fast if the host's glibc is too old for the pinned fuse3/libfuse3 .deb - caught the hard way on a DSM 6.2.4
+# box (old kernel, old glibc): even Debian's oldest still-published fuse3 package (buster, 3.4.1) needs glibc >=
+# 2.28, and FUSE3_DEB_VERSION's libfuse3.so.3 needs >= 2.34 - no Debian-built fuse3 package can ever satisfy a host
+# older than that via this script's approach (a containerd snapshotter proxy_plugin needing mount.fuse3). Without
+# this check, the failure only surfaces much later as an opaque mount error buried in containerd-fuse-overlayfs.log,
+# after dockerd.json and the Synology updater have already been modified.
+#======================================================================================================================
+check_glibc_for_fuse3() {
+  local min_major=2 min_minor=34 host_glibc host_major host_minor
+  host_glibc=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$')
+  if [ -z "${host_glibc}" ]; then
+    echo "Could not determine this host's glibc version; continuing, but the fuse3 install below will fail if it's too old."
+    return
+  fi
+  host_major=${host_glibc%%.*}
+  host_minor=${host_glibc#*.}
+  if [ "${host_major}" -lt "${min_major}" ] || \
+    { [ "${host_major}" -eq "${min_major}" ] && [ "${host_minor}" -lt "${min_minor}" ] ; } ; then
+    terminate "This host's glibc (${host_glibc}) is older than fuse-overlayfs needs here (>= ${min_major}.${min_minor}, for the pinned fuse3 ${FUSE3_DEB_VERSION} package). Even Debian's oldest still-published fuse3 package requires glibc >= 2.28, so no Debian-built fuse3 package can satisfy this host via this script's approach. fuse-overlayfs is not an option on this host - stay on 'aufs' and keep the Docker target below 24 (the last major version that still supports aufs)."
+  fi
+}
+
+#======================================================================================================================
 # Check if fuse module is available
 #======================================================================================================================
 check_fuse_support() {
@@ -498,6 +521,7 @@ fi
 echo "=== Synology Docker fuse-overlayfs installer ==="
 echo
 
+check_glibc_for_fuse3
 check_fuse_support
 check_overlay_needed
 check_storage_driver

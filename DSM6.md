@@ -70,6 +70,32 @@ Branch: `dsm6-compatibility` (merges the individual fix branches below).
      already inserts after. `uninstall()` and the final activation hints
      (`synopkg` vs `synoservicectl`) follow the same branch.
 
+5. **`cp: ... Text file busy` on `containerd`, then Docker fails to start**
+   (not actually DSM 6-specific - would hit DSM 7 `--fuse-overlayfs` users
+   too, just found here)
+   - `setup_fuse_overlayfs()` started the separate containerd (used by the
+     fuse-overlayfs snapshotter) immediately after configuring it, which is
+     *before* Docker gets stopped and its binaries replaced. That process
+     keeps `.../target/usr/bin/containerd` open for the rest of the run, so
+     `execute_install_bin`'s `cp .../docker/* .../bin/` can't overwrite that
+     one file ("Text file busy") - but since the script has no `set -e` and
+     `cp src/* dst/` is one invocation, every *other* file still got copied.
+     Result: dockerd silently ended up on the new version while containerd
+     stayed on the old one, which then failed to start with a useless
+     `error unknow`.
+   - Fix: moved starting the fuse-overlayfs rc.d script from
+     `setup_fuse_overlayfs()` (before the stop/replace) to
+     `execute_start_syno()` (after binaries are installed, right before
+     starting Docker) - the one firm guarantee is CM/Docker is fully stopped
+     at that point, so nothing is still holding the old binary. Also made
+     `execute_install_bin`'s `cp` fail loudly (`terminate`) instead of
+     silently continuing, so a mixed-version binary set can't happen unnoticed
+     again regardless of cause.
+   - If you hit the mixed-version state before this fix: just re-run the same
+     `update` command. It re-extracts and re-copies every binary from the
+     downloaded tarball, so it self-heals once the ordering bug no longer
+     leaves containerd busy during the copy.
+
 ## Known but not yet fixed
 
 - No precompiled `iptable_raw.ko`/`ip6table_raw.ko` exist for kernel

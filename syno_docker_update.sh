@@ -1204,7 +1204,11 @@ execute_install_bin() {
   print_status "Installing binaries"
   if [ "${stage}" = 'false' ] ; then
     if [ "${skip_docker_update}" = 'false' ] ; then
-      cp "${temp_dir}"/docker/* "${SYNO_DOCKER_BIN}"/
+      # A plain 'cp src/* dst/' copies every file it can even when one target is busy (e.g. still held open by a
+      # process Docker's own stop didn't know to stop), so a partial failure here would otherwise go unnoticed and
+      # leave a mismatched binary set - caught one where dockerd got upgraded but containerd silently didn't.
+      cp "${temp_dir}"/docker/* "${SYNO_DOCKER_BIN}"/ || \
+        terminate "Could not install all Docker binaries into ${SYNO_DOCKER_BIN} (see the 'cp' error above). Docker is in a mixed-version state; re-run the update once whatever's holding the file open is stopped."
     fi
     if [ "${skip_compose_update}" = 'false' ] ; then
       cp "${download_dir}"/docker-compose "${SYNO_DOCKER_BIN}"/docker-compose
@@ -1375,6 +1379,14 @@ execute_start_syno() {
     return
   fi
 
+  # dockerd depends on the snapshotter and the separate containerd fuse-overlayfs uses (normally started at boot by
+  # the rc.d script). Started here, after any binary swap, so it runs the new containerd binary and so cp onto that
+  # binary earlier in the run never finds it already open ("Text file busy").
+  if [ "${install_fuse}" = 'true' ] && [ -x "${FUSE_OVERLAYFS_RC_SCRIPT}" ] ; then
+    echo "   - starting fuse-overlayfs services"
+    "${FUSE_OVERLAYFS_RC_SCRIPT}" start
+  fi
+
   syno_status=$(get_syno_status)
   if [ "${syno_status}" = 'stopping' ] ; then
     print_syno_diagnostics
@@ -1505,13 +1517,9 @@ setup_fuse_overlayfs() {
   "${SCRIPT_DIR}/install_fuse_overlayfs.sh" ${fuse_args} || \
     terminate "fuse-overlayfs was not set up, so the update was stopped. Docker has not been changed."
 
-  # dockerd will depend on the snapshotter and the separate containerd (normally started at boot by the rc.d script).
-  # They use their own sockets, so they can start now alongside the running Docker, which reads its new configuration
-  # when it's restarted later in the update.
-  if [ -x "${FUSE_OVERLAYFS_RC_SCRIPT}" ] ; then
-    echo "   - starting fuse-overlayfs services"
-    "${FUSE_OVERLAYFS_RC_SCRIPT}" start
-  fi
+  # Starting the separate containerd here (before the binary swap) was tried before, but it pins the current
+  # containerd binary open for the rest of the run, and 'cp' onto an open binary fails with "Text file busy" once
+  # execute_install_bin gets to it. It's started in execute_start_syno() instead, once the new binary is in place.
 }
 
 #======================================================================================================================

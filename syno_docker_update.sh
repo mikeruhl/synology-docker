@@ -828,9 +828,20 @@ execute_prepare() {
 #   Writes the normalized state to stdout.
 #======================================================================================================================
 get_syno_status() {
-  local raw
-  raw=$(get_syno_status_raw)
-  case "${raw}" in
+  normalize_syno_status "$(get_syno_status_raw)"
+}
+
+#======================================================================================================================
+# Normalizes free-text package status output into one of 'started', 'stopped', 'stopping', 'starting' or 'unknown'.
+# Transitional states are matched first ('stopping' must not be read as 'stopped').
+#======================================================================================================================
+# Arguments:
+#   $1 - Raw status text
+# Outputs:
+#   Writes the normalized state to stdout.
+#======================================================================================================================
+normalize_syno_status() {
+  case "$1" in
     *stopping*) echo 'stopping' ;;
     *starting*) echo 'starting' ;;
     *started*|*running*) echo 'started' ;;
@@ -840,11 +851,38 @@ get_syno_status() {
 }
 
 #======================================================================================================================
+# Resolves and caches the service identifier 'synoservicectl' recognizes for Docker on this DSM 6 host. Some units
+# register it under the bare package name ('Docker'), others under a 'pkgctl-' prefixed name ('pkgctl-Docker'); the
+# wrong one makes every '--status' call fail with 'error unknow'. Both are probed once and the first one that yields
+# a non-'unknown' status wins; if neither does, the bare name is kept so error messages still show the package name.
+#======================================================================================================================
+# Outputs:
+#   Writes the resolved service identifier to stdout.
+#======================================================================================================================
+resolve_syno_servicectl_id() {
+  if [ -n "${SYNO_SERVICECTL_ID:-}" ] ; then
+    echo "${SYNO_SERVICECTL_ID}"
+    return
+  fi
+  local candidate raw
+  for candidate in "${SYNO_DOCKER_SERV_NAME}" "pkgctl-${SYNO_DOCKER_SERV_NAME}" ; do
+    raw=$("$(resolve_syno_bin "synoservicectl" "${SYNOSERVICECTL_BIN}")" --status "${candidate}" 2>&1)
+    if [ "$(normalize_syno_status "${raw}")" != 'unknown' ] ; then
+      SYNO_SERVICECTL_ID="${candidate}"
+      echo "${candidate}"
+      return
+    fi
+  done
+  SYNO_SERVICECTL_ID="${SYNO_DOCKER_SERV_NAME}"
+  echo "${SYNO_DOCKER_SERV_NAME}"
+}
+
+#======================================================================================================================
 # Prints the raw package status as reported by Synology's package tool, for diagnostics.
 #======================================================================================================================
 get_syno_status_raw() {
   case "${dsm_major_version}" in
-    "6") "$(resolve_syno_bin "synoservicectl" "${SYNOSERVICECTL_BIN}")" --status "${SYNO_DOCKER_SERV_NAME}" 2>&1 ;;
+    "6") "$(resolve_syno_bin "synoservicectl" "${SYNOSERVICECTL_BIN}")" --status "$(resolve_syno_servicectl_id)" 2>&1 ;;
     *)   "$(resolve_syno_bin "synopkg" "${SYNOPKG_BIN}")" status "${SYNO_DOCKER_SERV_NAME}" 2>&1 ;;
   esac
 }
@@ -862,7 +900,7 @@ syno_ctl() {
   [ "${action}" = 'start' ] && limit="${SYNO_SERVICE_START_TIMEOUT}"
   case "${dsm_major_version}" in
     "6") timeout --foreground "${limit}" "$(resolve_syno_bin "synoservicectl" "${SYNOSERVICECTL_BIN}")" \
-           "--${action}" "${SYNO_DOCKER_SERV_NAME}" ;;
+           "--${action}" "$(resolve_syno_servicectl_id)" ;;
     *)   timeout --foreground "${limit}" "$(resolve_syno_bin "synopkg" "${SYNOPKG_BIN}")" \
            "${action}" "${SYNO_DOCKER_SERV_NAME}" ;;
   esac
@@ -873,7 +911,7 @@ syno_ctl() {
 #======================================================================================================================
 syno_start_cmd() {
   if [ "${dsm_major_version}" = "6" ] ; then
-    echo "sudo synoservicectl --start ${SYNO_DOCKER_SERV_NAME}"
+    echo "sudo synoservicectl --start $(resolve_syno_servicectl_id)"
   else
     echo "sudo synopkg start ${SYNO_DOCKER_SERV_NAME}"
   fi
@@ -881,7 +919,7 @@ syno_start_cmd() {
 
 syno_status_cmd() {
   if [ "${dsm_major_version}" = "6" ] ; then
-    echo "sudo synoservicectl --status ${SYNO_DOCKER_SERV_NAME}"
+    echo "sudo synoservicectl --status $(resolve_syno_servicectl_id)"
   else
     echo "sudo synopkg status ${SYNO_DOCKER_SERV_NAME}"
   fi

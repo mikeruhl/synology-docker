@@ -206,6 +206,13 @@ Branch: `dsm6-compatibility` (merges the individual fix branches below).
 ## Working path on this hardware (summary)
 
 - `./syno_docker_update.sh logger` - works after fix #1
-- `./syno_docker_update.sh update --fuse-overlayfs -d 27.5.1` - avoids the
-  28+ iptables-module requirement entirely while still fixing the
-  `aufs` + Docker 24+ incompatibility via fuse-overlayfs
+- `--fuse-overlayfs` is a dead end on this box (glibc too old - see
+  above) - `check_glibc_for_fuse3()` now refuses it outright before
+  touching anything.
+- **Confirmed working**: `./syno_docker_update.sh update -d 23.0.6 --force`
+  (`aufs`, no `--fuse-overlayfs`) - clean run start to finish, Docker
+  started on the first try after fixes #1-#8. `23.0.6` is the practical
+  ceiling on this hardware: the last Docker major that still supports
+  `aufs`, since neither `overlay2` nor `fuse-overlayfs` are available here.
+  - `--force` was needed because Docker was already stopped/broken from
+    the earlier `--fuse-overlayfs` attempts; not needed on a clean start.

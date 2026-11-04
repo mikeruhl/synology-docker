@@ -189,6 +189,33 @@ Branch: `dsm6-compatibility` (merges the individual fix branches below).
     `libfuse3.so.3` at all. Not attempted yet; substantial rework, not a
     quick patch.
 
+9. **Containers running, but no published port reachable - not DSM 6-specific,
+   any Docker <26-ish install would hit this.**
+   - `execute_update_script()`'s IP-forwarding fix (see the comment at its
+     definition) hardcoded jumping `FORWARD` to a chain named
+     `DOCKER-FORWARD`. That's a newer dockerd convention; Docker 23.0.6 (and
+     presumably other pre-26-ish versions) never creates that chain - it
+     only sets up `DOCKER-USER` (plus the usual `DOCKER`/
+     `DOCKER-ISOLATION-STAGE-1/2` chains). The insert silently failed every
+     time (`iptables: No chain/target/match by that name`, but nothing
+     checked its exit code), so `FORWARD` never jumped into any Docker
+     chain at all - confirmed via `iptables -t filter -S`: the per-container
+     `DOCKER` chain rules were all there and correct, but `FORWARD` itself
+     had only Synology's own `-j FORWARD_FIREWALL`, nothing Docker-related.
+     Reachability became dependent entirely on whether a request happened
+     to match one of Synology's own static firewall allow-rules for that
+     port/source range.
+   - Fix: try `DOCKER-FORWARD` first (checking it actually exists via
+     `iptables -nL`, not just blindly inserting), fall back to `DOCKER-USER`
+     if it doesn't. Updated the matching removal/dedup sed patterns too, so
+     a future re-run cleans up this new form instead of duplicating it.
+   - Immediate fix for a box already in this state (no need to wait for a
+     full re-run): `sudo iptables -I FORWARD 1 -j DOCKER-USER` (or
+     `DOCKER-FORWARD`, whichever the installed dockerd actually created -
+     check with `sudo iptables -t filter -S | grep '^-N DOCKER'`). To apply
+     the script fix permanently without a full binary update, use
+     `./syno_docker_update.sh only_script` and restart Docker once.
+
 ## Known but not yet fixed
 
 - No precompiled `iptable_raw.ko`/`ip6table_raw.ko` exist for kernel

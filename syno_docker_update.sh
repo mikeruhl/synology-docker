@@ -71,7 +71,11 @@ readonly SYNO_DOCKER_SCRIPT_PATH="${SYNO_DOCKER_DIR}/scripts"
 readonly SYNO_DOCKER_SCRIPT="${SYNO_DOCKER_SCRIPT_PATH}/start-stop-status"
 readonly SYNO_DOCKER_JSON_PATH="${SYNO_DOCKER_DIR}/etc"
 readonly SYNO_DOCKER_JSON="${SYNO_DOCKER_JSON_PATH}/dockerd.json"
-readonly SYNO_DOCKER_SCRIPT_FORWARDING="            # Added by docker update\n          iptables -P FORWARD ACCEPT\n          iptables -C FORWARD -j DOCKER-FORWARD 2>/dev/null || iptables -I FORWARD 1 -j DOCKER-FORWARD"
+# 'DOCKER-FORWARD' is a newer dockerd convention; older dockerd (e.g. 23.x) never creates that chain and only sets
+# up 'DOCKER-USER' instead, which left this jump targeting a chain that doesn't exist - a no-op, silently - so
+# nothing ever forwarded into Docker's own chains and published ports stayed unreachable. Try both, use whichever
+# this dockerd actually created.
+readonly SYNO_DOCKER_SCRIPT_FORWARDING="            # Added by docker update\n          iptables -P FORWARD ACCEPT\n          for chain in DOCKER-FORWARD DOCKER-USER; do iptables -nL \"\${chain}\" >/dev/null 2>&1 && { iptables -C FORWARD -j \"\${chain}\" 2>/dev/null || iptables -I FORWARD 1 -j \"\${chain}\"; break; }; done"
 readonly SYNO_SERVICE_STOP_TIMEOUT='10m'
 readonly SYNO_STATUS_POLL_INTERVAL=5
 readonly SYNOPKG_BIN='/usr/syno/bin/synopkg'
@@ -1314,6 +1318,7 @@ execute_update_script() {
       # (and the comment directly above them) are removed; the identically-commented insmod block added by
       # install_iptables_modules.sh is left untouched.
       sed -i '/^[[:space:]]*iptables -C FORWARD -j DOCKER-FORWARD/d' "${file}"
+      sed -i '/^[[:space:]]*for chain in DOCKER-FORWARD DOCKER-USER;/d' "${file}"
       sed -i '/^[[:space:]]*iptables -[ID] FORWARD -[io] docker0 -j ACCEPT[[:space:]]*$/d' "${file}"
       sed -i '/^[[:space:]]*# Added by docker update[[:space:]]*$/{N;/\n[[:space:]]*iptables -P FORWARD ACCEPT/d}' "${file}"
       sed -i '/^[[:space:]]*iptables -P FORWARD ACCEPT[[:space:]]*$/d' "${file}"
